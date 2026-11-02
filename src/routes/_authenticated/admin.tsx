@@ -3,12 +3,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
 import { toast } from "sonner";
+import { withTimeout } from "@/lib/async";
 import {
   AlertTriangle,
   CheckCircle2,
   ClipboardList,
   Eye,
   LogOut,
+  RefreshCw,
   ShieldAlert,
   Users,
 } from "lucide-react";
@@ -37,6 +39,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 
 type Row = Tables<"verifications">;
+const ADMIN_REQUEST_TIMEOUT_MS = 15_000;
 
 export const Route = createFileRoute("/_authenticated/admin")({
   head: () => ({
@@ -62,12 +65,25 @@ export const Route = createFileRoute("/_authenticated/admin")({
 function Admin() {
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const role = useQuery({ queryKey: ["admin-role"], queryFn: async () => {
-      const { data: u } = await supabase.auth.getUser();
+  const role = useQuery({
+    queryKey: ["admin-role"],
+    queryFn: async () => {
+      const { data: u, error: userError } = await withTimeout(
+        supabase.auth.getUser(),
+        ADMIN_REQUEST_TIMEOUT_MS,
+        "Admin access check",
+      );
+      if (userError) throw userError;
       if (!u.user) return { isAdmin: false };
-      const { data, error } = await supabase.rpc("has_role", { _user_id: u.user.id, _role: "admin" });
-      return { isAdmin: !error && data === true };
+      const { data, error } = await withTimeout(
+        supabase.rpc("has_role", { _user_id: u.user.id, _role: "admin" }),
+        ADMIN_REQUEST_TIMEOUT_MS,
+        "Admin role lookup",
+      );
+      if (error) throw error;
+      return { isAdmin: data === true };
     },
+    retry: 1,
   });
   const isAdmin = role.data?.isAdmin === true;
 
@@ -75,27 +91,37 @@ function Admin() {
     queryKey: ["verifications"],
     enabled: isAdmin,
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("verifications")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(200);
+      const { data, error } = await withTimeout(
+        supabase
+          .from("verifications")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(200),
+        ADMIN_REQUEST_TIMEOUT_MS,
+        "Loading verification cases",
+      );
       if (error) throw error;
       return data;
     },
+    retry: 1,
   });
   const auditQ = useQuery({
     queryKey: ["audit"],
     enabled: isAdmin,
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("audit_log")
-        .select("*")
-        .order("created_at", { ascending: false })
-        .limit(50);
+      const { data, error } = await withTimeout(
+        supabase
+          .from("audit_log")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(50),
+        ADMIN_REQUEST_TIMEOUT_MS,
+        "Loading audit history",
+      );
       if (error) throw error;
       return data;
     },
+    retry: 1,
   });
 
   useEffect(() => {
@@ -107,7 +133,7 @@ function Admin() {
     return () => clearInterval(t);
   }, [isAdmin, qc]);
 
-  const rows = rowsQ.data ?? [];
+  const rows = useMemo(() => rowsQ.data ?? [], [rowsQ.data]);
   const [selected, setSelected] = useState<Row | null>(null);
 
   const stats = useMemo(
@@ -142,8 +168,22 @@ function Admin() {
     navigate({ to: "/auth" });
   };
 
-  if (role.isLoading) {
+  if (role.isPending) {
     return <main className="mx-auto max-w-7xl px-4 py-16 text-sm text-muted-foreground">Checking access…</main>;
+  }
+  if (role.isError) {
+    return (
+      <main className="mx-auto max-w-md px-4 py-16 text-center">
+        <AlertTriangle className="mx-auto size-10 text-warning" />
+        <h1 className="mt-3 text-xl font-semibold">Couldn’t verify admin access</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Check your connection and try again. Your dashboard data hasn’t been changed.
+        </p>
+        <Button className="mt-4" onClick={() => void role.refetch()}>
+          <RefreshCw className="size-4" /> Retry access check
+        </Button>
+      </main>
+    );
   }
   if (!isAdmin) {
     return (
@@ -201,9 +241,26 @@ function Admin() {
         </CardHeader>
         <CardContent className="overflow-x-auto">
           {rows.length === 0 ? (
-            <p className="py-8 text-center text-sm text-muted-foreground">
-              {rowsQ.isLoading ? "Loading…" : "No verifications yet. Complete one on the Customer Verification Portal."}
-            </p>
+            rowsQ.isError ? (
+              <div className="flex flex-col items-center gap-3 py-8 text-center">
+                <AlertTriangle className="size-8 text-warning" />
+                <div>
+                  <p className="text-sm font-medium">Couldn’t load verification cases</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Check your connection or permissions, then try again.
+                  </p>
+                </div>
+                <Button variant="secondary" size="sm" onClick={() => void rowsQ.refetch()}>
+                  <RefreshCw className="size-4" /> Retry
+                </Button>
+              </div>
+            ) : (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                {rowsQ.isPending
+                  ? "Loading verification cases…"
+                  : "No verifications yet. Complete one on the Customer Verification Portal."}
+              </p>
+            )
           ) : (
             <Table>
               <TableHeader>
@@ -260,7 +317,19 @@ function Admin() {
           <CardTitle className="text-base">Immutable audit log</CardTitle>
         </CardHeader>
         <CardContent className="space-y-2">
-          {(auditQ.data ?? []).length === 0 && <p className="text-sm text-muted-foreground">No events yet.</p>}
+          {auditQ.isError ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/5 p-3">
+              <p className="text-sm text-muted-foreground">Couldn’t load audit events.</p>
+              <Button variant="secondary" size="sm" onClick={() => void auditQ.refetch()}>
+                <RefreshCw className="size-4" /> Retry
+              </Button>
+            </div>
+          ) : null}
+          {!auditQ.isError && (auditQ.data ?? []).length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              {auditQ.isPending ? "Loading audit history…" : "No events yet."}
+            </p>
+          )}
           {(auditQ.data ?? []).map((a) => (
             <div key={a.id} className="flex flex-wrap gap-x-3 text-sm">
               <span className="font-mono text-xs text-muted-foreground">
