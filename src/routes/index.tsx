@@ -39,7 +39,6 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -662,15 +661,15 @@ function shuffleChallenges(): Challenge[] {
 }
 
 // Liveness tuning. Gestures are held for a real amount of TIME, so results don't depend on device speed.
-const HOLD_MS = 350; // a smile / head turn must be held this long
+const HOLD_MS = 450; // a smile / head turn must be held this long
 const NEUTRAL_MS = 600; // neutral face before the selfie is taken
-const STEP_TIMEOUT_MS = 15000; // per attempt at a gesture
+const STEP_TIMEOUT_MS = 20000; // per attempt at a gesture
 const MAX_ATTEMPTS = 3; // attempts per gesture before the whole check fails
-const TURN_YAW = 0.3; // how far the head must turn from the neutral pose
-const SMILE_MIN = 0.8;
+const TURN_YAW = 0.24; // how far the head must turn from the neutral pose
+const TURN_RELEASE_YAW = 0.18; // tolerate small tracking jitter after a turn is detected
+const SMILE_MIN = 0.72;
+const SMILE_RELEASE_MIN = 0.58;
 const FACE_LOST_MS = 1500;
-
-type Live = { score: number; yaw: number; ear: number; smile: number } | null;
 
 function LivenessStep({
   onBack,
@@ -683,7 +682,7 @@ function LivenessStep({
   const [seq, setSeq] = useState<Challenge[]>(ALL_CHALLENGES);
   const [index, setIndex] = useState(-1); // -1 = capturing the neutral selfie
   const [log, setLog] = useState<ChallengeLog[]>([]);
-  const [live, setLive] = useState<Live>(null);
+  const [live, setLive] = useState(false);
   const [blinks, setBlinks] = useState(0);
   const [hint, setHint] = useState("");
   const [selfie, setSelfie] = useState<string | null>(null);
@@ -801,11 +800,11 @@ function LivenessStep({
           baseYaw = f.yaw;
           first = false;
         } else {
-          sYaw = sYaw * 0.5 + f.yaw * 0.5;
-          sSmile = sSmile * 0.5 + f.smile * 0.5;
+          sYaw = sYaw * 0.4 + f.yaw * 0.6;
+          sSmile = sSmile * 0.4 + f.smile * 0.6;
         }
         const rel = sYaw - baseYaw;
-        setLive({ score: f.score, yaw: rel, ear: f.ear, smile: sSmile });
+        setLive(true);
 
         // Learn this person's normal open-eye ratio while the eyes look open.
         if (!eyesClosed && (earOpen === 0 || f.ear > earOpen * 0.85)) {
@@ -827,7 +826,7 @@ function LivenessStep({
         }
 
         if (step === -1) {
-          const neutral = Math.abs(sYaw) < 0.12 && f.score > 0.6 && sSmile < 0.5;
+          const neutral = Math.abs(sYaw - baseYaw) < 0.12 && f.score > 0.6 && sSmile < 0.5;
           if (!neutral) heldSince = null;
           else if (heldSince === null) heldSince = t;
           else if (wantSelfie && f.descriptor) {
@@ -847,7 +846,7 @@ function LivenessStep({
           }
         } else if (step >= 0 && step < sequence.length) {
           const id = sequence[step]!.id;
-          const neutral = Math.abs(rel) < 0.12 && sSmile < 0.4 && (earOpen === 0 || f.ear > earOpen * 0.85);
+          const neutral = Math.abs(rel) < 0.12 && sSmile < 0.55 && (earOpen === 0 || f.ear > earOpen * 0.85);
           if (!armed) {
             if (neutral) armed = true;
           } else if (id === "blink") {
@@ -869,19 +868,20 @@ function LivenessStep({
               }
             }
           } else {
+            const justStarted = heldSince === null;
             const ok =
               id === "smile"
-                ? sSmile > SMILE_MIN && Math.abs(rel) < 0.2
+                ? sSmile > (justStarted ? SMILE_MIN : SMILE_RELEASE_MIN) && Math.abs(rel) < 0.25
                 : id === "left"
-                  ? rel > TURN_YAW
-                  : rel < -TURN_YAW;
+                  ? rel > (justStarted ? TURN_YAW : TURN_RELEASE_YAW)
+                  : rel < -(justStarted ? TURN_YAW : TURN_RELEASE_YAW);
             if (!ok) heldSince = null;
             else if (heldSince === null) heldSince = t;
             else if (t - heldSince >= HOLD_MS) pass(t);
           }
         }
       } else {
-        setLive(null);
+        setLive(false);
         if (t - lastSeen > FACE_LOST_MS) {
           resetProgress(); // face lost: nothing counts until it is back
           if (step === -1) heldSince = null;
@@ -906,13 +906,13 @@ function LivenessStep({
           setPhase("failed");
           cam.stop();
           toast.error("Liveness check failed", {
-            description: "We couldn't confirm the gestures. Try again in good light, facing the camera.",
+            description:
+              "We couldn't confirm the gestures. Try again in good light, facing the camera.",
           });
           return;
         }
         const h = sequence[step]!.hint;
         setHint(h);
-        toast.message("Gesture not detected yet", { description: h });
         stepStart = t;
         resetProgress();
       }
@@ -922,13 +922,20 @@ function LivenessStep({
 
   const begin = async () => {
     setPhase("loading");
+    setLive(false);
+    setIndex(-1);
+    setLog([]);
+    setBlinks(0);
+    setHint("");
+    setSelfie(null);
+    setSelfieDescriptor(null);
     try {
       const [{ loadFaceApi }, ok] = await Promise.all([import("@/lib/face"), cam.start()]);
       if (!ok) {
         setPhase("nocam");
         return;
       }
-      await loadFaceApi();
+      await withTimeout(loadFaceApi(), 45_000, "Face tracking models");
       const sequence = shuffleChallenges();
       setSeq(sequence);
       setPhase("running");
@@ -946,13 +953,17 @@ function LivenessStep({
         runRef.current = false;
         setPhase("nocam");
         cam.stop();
-        toast.error("Face tracking stopped", { description: "You can continue — your case will be reviewed manually." });
+        toast.error("Face tracking stopped", {
+          description: "You can continue — your case will be reviewed manually.",
+        });
       });
     } catch (e) {
       console.error(e);
       cam.stop();
       setPhase("nocam");
-      toast.error("Face tracking couldn't load", { description: "Check your internet connection and try again." });
+      toast.error("Face tracking couldn't load", {
+        description: "Check your internet connection and try again.",
+      });
     }
   };
 
@@ -976,18 +987,27 @@ function LivenessStep({
               ? "Camera or face tracking unavailable"
               : "Center your face in the frame";
 
-  const pct = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
-
   return (
     <Card className="panel">
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Camera className="size-5 text-primary" /> Live Gesture Liveness Check
-        </CardTitle>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <ScanFace className="size-5 text-primary" /> Live identity check
+            </CardTitle>
+            <p className="mt-2 max-w-xl text-sm text-muted-foreground">
+              A quick camera check confirms you’re here. Follow a few simple prompts at your own
+              pace.
+            </p>
+          </div>
+          <Badge variant="outline" className="gap-1.5 border-success/30 bg-success/5 text-success">
+            <Lock className="size-3.5" /> Secure check
+          </Badge>
+        </div>
       </CardHeader>
       <CardContent className="grid gap-6 lg:grid-cols-2">
         <div>
-          <div className="relative mx-auto flex aspect-square w-full max-w-sm items-center justify-center overflow-hidden rounded-2xl bg-surface-2/60">
+          <div className="relative mx-auto flex aspect-square w-full max-w-sm items-center justify-center overflow-hidden rounded-3xl border border-border/70 bg-[radial-gradient(ellipse_at_50%_42%,color-mix(in_oklab,var(--primary)_16%,var(--surface-2)),var(--surface)_72%)] shadow-[0_24px_70px_-38px_color-mix(in_oklab,var(--primary)_60%,transparent)]">
             {cam.active && (
               <>
                 <video
@@ -996,17 +1016,46 @@ function LivenessStep({
                   muted
                   className="absolute inset-0 size-full -scale-x-100 object-cover"
                 />
-                <canvas ref={canvasRef} className="pointer-events-none absolute inset-0 size-full -scale-x-100 object-cover" />
+                <canvas
+                  ref={canvasRef}
+                  className="pointer-events-none absolute inset-0 size-full -scale-x-100 object-cover"
+                />
               </>
             )}
             {!cam.active && selfie && (
-              <img src={selfie} alt="Your verified selfie" className="absolute inset-0 size-full -scale-x-100 object-cover opacity-70" />
+              <img
+                src={selfie}
+                alt="Your verified selfie"
+                className="absolute inset-0 size-full -scale-x-100 object-cover opacity-70"
+              />
             )}
             <div
-              className={`pointer-events-none absolute size-56 rounded-full border-2 md:size-64 ${
-                done ? "border-success" : "border-scanner"
+              className={`pointer-events-none absolute size-56 rounded-full border-2 shadow-[inset_0_0_32px_-18px_currentColor] transition-colors duration-500 md:size-64 ${
+                done
+                  ? "border-success text-success"
+                  : live
+                    ? "border-primary/80 text-primary"
+                    : "border-scanner/70 text-scanner"
               } ${phase === "running" ? "pulse-ring" : ""}`}
             />
+            {cam.active && (
+              <div className="absolute left-3 right-3 top-3 z-10 flex items-center justify-between gap-2">
+                <Badge className="gap-1.5 border border-background/20 bg-background/75 text-foreground shadow-sm backdrop-blur">
+                  <span
+                    className={`size-2 rounded-full ${live ? "animate-pulse bg-success" : "bg-warning"}`}
+                  />
+                  {live ? "Face in frame" : "Finding your face"}
+                </Badge>
+                {phase === "running" && (
+                  <Badge
+                    variant="outline"
+                    className="border-background/30 bg-background/70 text-foreground backdrop-blur"
+                  >
+                    {index < 0 ? "Getting ready" : `Step ${index + 1} of ${seq.length}`}
+                  </Badge>
+                )}
+              </div>
+            )}
             <AnimatePresence>
               {phase === "running" && log.length > 0 && (
                 <motion.div
@@ -1020,7 +1069,9 @@ function LivenessStep({
                 </motion.div>
               )}
             </AnimatePresence>
-            <div className={`relative z-10 text-center ${cam.active ? "mt-auto mb-4 rounded-lg bg-background/75 px-3 py-2 backdrop-blur" : ""}`}>
+            <div
+              className={`relative z-10 text-center ${cam.active ? "mt-auto mb-4 max-w-[85%] rounded-2xl border border-background/10 bg-background/80 px-5 py-3 shadow-lg backdrop-blur-md" : ""}`}
+            >
               {!cam.active &&
                 (done ? (
                   <UserRoundCheck className="mx-auto size-12 text-success" />
@@ -1041,22 +1092,24 @@ function LivenessStep({
 
           <div className="mt-4 space-y-2">
             <div className="flex justify-between text-xs text-muted-foreground">
-              <span>Gestures verified</span>
-              <span className="font-mono">{log.length}/{seq.length}</span>
+              <span>{done ? "Check complete" : "Your progress"}</span>
+              <span className="font-mono">
+                {log.length}/{seq.length}
+              </span>
             </div>
-            <Progress value={progress} />
+            <Progress value={progress} className="h-2 overflow-hidden rounded-full" />
           </div>
 
           {phase === "failed" && (
             <p className="mt-3 text-sm text-destructive">
-              The gestures weren't detected, so this check can't be completed. Make sure your face is well lit and fully in
-              view, then try again.
+              The gestures weren't detected, so this check can't be completed. Make sure your face
+              is well lit and fully in view, then try again.
             </p>
           )}
 
           {(phase === "idle" || phase === "nocam" || phase === "failed") && (
             <Button className="mt-4 w-full" onClick={() => void begin()}>
-              {phase === "idle" ? "Start liveness check" : "Try again"}
+              {phase === "idle" ? "Start secure face check" : "Try the check again"}
             </Button>
           )}
           {phase === "nocam" && (
@@ -1064,7 +1117,11 @@ function LivenessStep({
               variant="outline"
               className="mt-2 w-full"
               onClick={() =>
-                onNext({ selfie: null, selfieDescriptor: null, liveness: { completed: false, challenges: log } })
+                onNext({
+                  selfie: null,
+                  selfieDescriptor: null,
+                  liveness: { completed: false, challenges: log },
+                })
               }
             >
               Continue without camera (manual review)
@@ -1073,25 +1130,89 @@ function LivenessStep({
         </div>
 
         <div className="space-y-4">
-          <SignalBar label="Face detection confidence" value={live ? pct(live.score * 100) : 0} tone="success" />
-          <SignalBar label="Smile intensity" value={live ? pct(live.smile * 100) : 0} tone="primary" />
-          <SignalBar label="Head turn from centre" value={live ? pct(Math.abs(live.yaw) * 250) : 0} tone="accent" />
-          <SignalBar label="Eye openness" value={live ? pct(live.ear * 300) : 0} tone="primary" />
+          <div className="panel space-y-4 p-5">
+            <div>
+              <p className="text-sm font-semibold">Your check, step by step</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                Take your time. We’ll move on automatically when each prompt is detected.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <div
+                className={`flex items-center gap-3 rounded-xl border p-3 transition-colors ${
+                  selfie
+                    ? "border-success/30 bg-success/5"
+                    : phase === "running" && index === -1
+                      ? "border-primary/40 bg-primary/5"
+                      : "border-border/70 bg-background/30"
+                }`}
+              >
+                <span
+                  className={`flex size-8 shrink-0 items-center justify-center rounded-full ${selfie ? "bg-success/15 text-success" : "bg-secondary text-muted-foreground"}`}
+                >
+                  {selfie ? <CheckCircle2 className="size-4" /> : <Camera className="size-4" />}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">Look at the camera</p>
+                  <p className="text-xs text-muted-foreground">
+                    {selfie ? "Selfie captured" : "Start facing forward"}
+                  </p>
+                </div>
+                {selfie && <CheckCircle2 className="size-4 shrink-0 text-success" />}
+              </div>
+              {seq.map((challenge, i) => {
+                const complete = i < log.length;
+                const active = phase === "running" && i === index;
+                return (
+                  <div
+                    key={challenge.id}
+                    className={`flex items-center gap-3 rounded-xl border p-3 transition-colors ${
+                      complete
+                        ? "border-success/30 bg-success/5"
+                        : active
+                          ? "border-primary/40 bg-primary/5 shadow-[0_0_24px_-16px_var(--primary)]"
+                          : "border-border/70 bg-background/30"
+                    }`}
+                  >
+                    <span
+                      className={`flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
+                        complete
+                          ? "bg-success/15 text-success"
+                          : active
+                            ? "bg-primary/15 text-primary"
+                            : "bg-secondary text-muted-foreground"
+                      }`}
+                    >
+                      {complete ? <CheckCircle2 className="size-4" /> : i + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className={`text-sm font-medium ${active ? "text-primary" : ""}`}>
+                        {challenge.label}
+                      </p>
+                      {active && (
+                        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                          {challenge.hint}
+                        </p>
+                      )}
+                    </div>
+                    {complete && (
+                      <span className="text-[11px] text-muted-foreground">
+                        {(log[i]!.ms / 1000).toFixed(1)}s
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
-          <Separator />
-          <ul className="space-y-1.5 text-sm">
-            <li className="flex items-center gap-2">
-              <CheckCircle2 className={`size-4 ${selfie ? "text-success" : "text-muted-foreground/40"}`} />
-              Neutral selfie captured
-            </li>
-            {seq.map((c, i) => (
-              <li key={c.id} className={`flex items-center gap-2 ${i === index && phase === "running" ? "text-primary" : ""}`}>
-                <CheckCircle2 className={`size-4 ${i < log.length ? "text-success" : "text-muted-foreground/40"}`} />
-                {c.label}
-                {log[i] && <span className="ml-auto font-mono text-[11px] text-muted-foreground">{(log[i].ms / 1000).toFixed(1)}s</span>}
-              </li>
-            ))}
-          </ul>
+          <div className="flex items-start gap-3 rounded-xl border border-primary/15 bg-primary/5 p-4">
+            <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" />
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              For best results, keep your face well lit, look toward the camera, and move naturally.
+              Face tracking runs on this device.
+            </p>
+          </div>
 
           <div className="flex justify-between gap-3 pt-1">
             <Button
@@ -1109,7 +1230,11 @@ function LivenessStep({
               disabled={!done || log.length < seq.length}
               onClick={() => {
                 if (!done || log.length < seq.length) return; // never continue unless every gesture was performed
-                onNext({ selfie, selfieDescriptor, liveness: { completed: true, challenges: log } });
+                onNext({
+                  selfie,
+                  selfieDescriptor,
+                  liveness: { completed: true, challenges: log },
+                });
               }}
             >
               View result
@@ -1118,29 +1243,6 @@ function LivenessStep({
         </div>
       </CardContent>
     </Card>
-  );
-}
-
-function SignalBar({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: "success" | "primary" | "accent";
-}) {
-  const bg = tone === "success" ? "bg-success" : tone === "primary" ? "bg-primary" : "bg-accent";
-  return (
-    <div className="space-y-1.5">
-      <div className="flex justify-between text-xs">
-        <span className="text-muted-foreground">{label}</span>
-        <span className="font-mono">{value}%</span>
-      </div>
-      <div className="h-2 overflow-hidden rounded-full bg-secondary">
-        <motion.div className={`h-full rounded-full ${bg}`} animate={{ width: `${value}%` }} transition={{ duration: 0.2 }} />
-      </div>
-    </div>
   );
 }
 
