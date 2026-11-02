@@ -120,10 +120,14 @@ export function parseIdText(raw: string, confidence: number): OcrResult {
     return "";
   };
   r.dateOfBirth ||= labelled(/BIRTH|D\.?O\.?B|BORN/);
-  r.expiryDate ||= labelled(/EXPIR|VALID|DATE OF ISSUE|ISSUE/);
+  r.expiryDate ||= labelled(/EXPIR|VALID(?: UNTIL| TO)?/);
+  r.dateOfIssue ||= labelled(/DATE OF ISSUE|ISSUE DATE|ISSUED/);
   const all = (noNrc(upper).match(dateRe) ?? []).map(normDate).filter(Boolean).sort();
   if (!r.dateOfBirth && all[0]) r.dateOfBirth = all[0];
-  if (!r.expiryDate && all.length > 1) r.expiryDate = all[all.length - 1]!;
+  if (!r.expiryDate) {
+    const remainingDates = all.filter((date) => date !== r.dateOfBirth && date !== r.dateOfIssue);
+    if (remainingDates.length) r.expiryDate = remainingDates[remainingDates.length - 1]!;
+  }
 
   // Name
   if (!r.fullName) {

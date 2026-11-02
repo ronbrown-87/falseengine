@@ -39,6 +39,13 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -322,26 +329,68 @@ const fieldLabels: { key: keyof Fields; label: string; side: "Front" | "Back" | 
   { key: "documentNumber", label: "Document / NRC Number", side: "Front/Back" },
   { key: "dateOfBirth", label: "Date of Birth", side: "Front" },
   { key: "gender", label: "Gender", side: "Front/Back" },
-  { key: "dateOfIssue", label: "Date of Issue", side: "Back" },
-  { key: "placeOfIssue", label: "Place of Issue", side: "Back" },
+  { key: "dateOfIssue", label: "Date of Issue", side: "Front/Back" },
+  { key: "placeOfIssue", label: "Place of Issue", side: "Front/Back" },
   { key: "expiryDate", label: "Expiry Date", side: "Front/Back" },
-  { key: "documentType", label: "Document Type", side: "Front" },
 ];
 
+const documentTypes = [
+  { value: "Auto-detect", label: "Auto-detect document" },
+  { value: "National ID", label: "National Registration Card (NRC)" },
+  { value: "Passport", label: "Passport" },
+  { value: "Driver's License", label: "Driver's licence" },
+  { value: "Other", label: "Other identity document" },
+] as const;
+type DocumentTypeChoice = (typeof documentTypes)[number]["value"];
+
+const fieldsByDocumentType: Record<string, (keyof Fields)[]> = {
+  "Auto-detect": fieldLabels.map(({ key }) => key),
+  "National ID": [
+    "fullName",
+    "documentNumber",
+    "dateOfBirth",
+    "gender",
+    "dateOfIssue",
+    "placeOfIssue",
+  ],
+  Passport: [
+    "fullName",
+    "documentNumber",
+    "dateOfBirth",
+    "gender",
+    "dateOfIssue",
+    "placeOfIssue",
+    "expiryDate",
+  ],
+  "Driver's License": fieldLabels.map(({ key }) => key),
+  Other: fieldLabels.map(({ key }) => key),
+};
+
 const emptyFields: Fields = {
-  fullName: "", documentNumber: "", dateOfBirth: "", gender: "", expiryDate: "",
-  dateOfIssue: "", placeOfIssue: "", documentType: "",
+  fullName: "",
+  documentNumber: "",
+  dateOfBirth: "",
+  gender: "",
+  expiryDate: "",
+  dateOfIssue: "",
+  placeOfIssue: "",
+  documentType: "",
 };
 
 async function readSide(
-  analyze: (a: { data: { image: string; side: "front" | "back" } }) => Promise<
-    { ok: true; result: OcrResult } | { ok: false; error: string }
-  >,
+  analyze: (a: {
+    data: { image: string; side: "front" | "back"; documentType: DocumentTypeChoice };
+  }) => Promise<{ ok: true; result: OcrResult } | { ok: false; error: string }>,
   image: string,
   side: "front" | "back",
+  documentType: DocumentTypeChoice,
 ): Promise<{ r: OcrResult | null; engine: "ai" | "device" | "none" }> {
   try {
-    const res = await withTimeout(analyze({ data: { image, side } }), 50_000, "AI reader");
+    const res = await withTimeout(
+      analyze({ data: { image, side, documentType } }),
+      50_000,
+      "AI reader",
+    );
     if (res.ok) return { r: res.result, engine: "ai" };
     console.warn("AI reader unavailable, using on-device reader:", res.error);
   } catch (e) {
@@ -365,10 +414,14 @@ function DocumentStep({
 }) {
   const analyze = useServerFn(analyzeDocument);
   const [side, setSide] = useState<"front" | "back">("front");
-  const [images, setImages] = useState<{ front: string | null; back: string | null }>({ front: null, back: null });
+  const [images, setImages] = useState<{ front: string | null; back: string | null }>({
+    front: null,
+    back: null,
+  });
   const [busy, setBusy] = useState<"front" | "back" | null>(null);
   const [ocr, setOcr] = useState<OcrResult | null>(null);
   const [fields, setFields] = useState<Fields>(emptyFields);
+  const [selectedDocType, setSelectedDocType] = useState<DocumentTypeChoice>("Auto-detect");
   const [engine, setEngine] = useState<string | null>(null);
   const [idDescriptor, setIdDescriptor] = useState<number[] | null>(null);
   const [faceStatus, setFaceStatus] = useState<"idle" | "checking" | "found" | "missing">("idle");
@@ -379,8 +432,8 @@ function DocumentStep({
     setFields((f) => {
       const next = { ...f };
       for (const k of Object.keys(emptyFields) as (keyof Fields)[]) {
+        if (k === "documentType") continue;
         const v = (r[k as keyof OcrResult] as string | undefined) ?? "";
-        if (k === "documentType" && v === "Other") continue;
         if (v && (overwrite || !next[k])) next[k] = v;
       }
       return next;
@@ -392,6 +445,16 @@ function DocumentStep({
     if (scanning.current) return; // ignore a second drop/click while a scan is still running
     scanning.current = true;
     setBusy(which);
+    if (which === "front") {
+      setOcr(null);
+      setEngine(null);
+      setFaceStatus("idle");
+      setIdDescriptor(null);
+      setFields({
+        ...emptyFields,
+        documentType: selectedDocType === "Auto-detect" ? "" : selectedDocType,
+      });
+    }
     try {
       let jpeg: string;
       try {
@@ -419,10 +482,20 @@ function DocumentStep({
           });
       }
 
-      const { r, engine: used } = await readSide(analyze, jpeg, which);
+      const { r, engine: used } = await readSide(analyze, jpeg, which, selectedDocType);
       if (!r) {
-        toast.message("Automatic reading wasn't possible", { description: "Please type in your details." });
+        toast.message("Automatic reading wasn't possible", {
+          description: "Please type in your details.",
+        });
         return;
+      }
+      if (which === "front") {
+        if (selectedDocType === "Auto-detect") {
+          const detectedType =
+            documentTypes.find((type) => type.value === r.documentType)?.value ?? "Other";
+          setSelectedDocType(detectedType);
+          setFields((currentFields) => ({ ...currentFields, documentType: detectedType }));
+        }
       }
       merge(r, which === "front");
       if (which === "front") {
@@ -432,7 +505,9 @@ function DocumentStep({
         else toast.success("Front side read", { description: r.notes });
         setSide("back");
       } else {
-        setOcr((o) => (o ? { ...o, mrzOrBarcodePresent: o.mrzOrBarcodePresent || r.mrzOrBarcodePresent } : r));
+        setOcr((o) =>
+          o ? { ...o, mrzOrBarcodePresent: o.mrzOrBarcodePresent || r.mrzOrBarcodePresent } : r,
+        );
         toast.success("Back side read");
       }
     } catch (e) {
@@ -495,10 +570,16 @@ function DocumentStep({
                   setSide(s);
                 }}
                 className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors disabled:opacity-60 ${
-                  side === s ? "border-primary bg-primary/15 text-primary" : "border-border bg-surface-2/40 text-muted-foreground"
+                  side === s
+                    ? "border-primary bg-primary/15 text-primary"
+                    : "border-border bg-surface-2/40 text-muted-foreground"
                 }`}
               >
-                {images[s] ? <CheckCircle2 className="size-4 text-success" /> : <ScanLine className="size-4" />}
+                {images[s] ? (
+                  <CheckCircle2 className="size-4 text-success" />
+                ) : (
+                  <ScanLine className="size-4" />
+                )}
                 {s === "front" ? "Front side" : "Back side"}
               </button>
             ))}
@@ -512,10 +593,19 @@ function DocumentStep({
             className="relative flex aspect-[16/10] items-center justify-center overflow-hidden rounded-xl border-2 border-dashed border-primary/35 bg-surface-2/40"
           >
             {cam.active && (
-              <video ref={cam.videoRef} playsInline muted className="absolute inset-0 size-full object-cover" />
+              <video
+                ref={cam.videoRef}
+                playsInline
+                muted
+                className="absolute inset-0 size-full object-cover"
+              />
             )}
             {!cam.active && current && (
-              <img src={current} alt={`ID ${side} side`} className="absolute inset-0 size-full object-cover opacity-85" />
+              <img
+                src={current}
+                alt={`ID ${side} side`}
+                className="absolute inset-0 size-full object-cover opacity-85"
+              />
             )}
             <div className="pointer-events-none absolute inset-4 rounded-lg border border-scanner/40" />
             {busy === side && (
@@ -530,7 +620,9 @@ function DocumentStep({
                 <p className="mt-2 text-sm font-medium">
                   {side === "front" ? "Front of your NRC, ID or licence" : "Back of your card"}
                 </p>
-                <p className="text-xs text-muted-foreground">Drag & drop, upload or use the camera</p>
+                <p className="text-xs text-muted-foreground">
+                  Drag & drop, upload or use the camera
+                </p>
               </div>
             )}
           </div>
@@ -538,8 +630,7 @@ function DocumentStep({
           <input
             ref={fileRef}
             type="file"
-            accept="image/*"
-            capture="environment"
+            accept="image/jpeg,image/png,image/webp"
             className="hidden"
             onChange={(e) => {
               onFile(e.target.files?.[0]);
@@ -548,14 +639,16 @@ function DocumentStep({
           />
           <div className="mt-3 flex flex-wrap gap-2">
             <Button variant="secondary" onClick={() => fileRef.current?.click()} disabled={!!busy}>
-              <Upload className="size-4" /> Upload {side}
+              <Upload className="size-4" /> Choose {side} image
             </Button>
             {cam.active ? (
               <>
                 <Button onClick={takePhoto}>
                   <Camera className="size-4" /> Capture {side}
                 </Button>
-                <Button variant="ghost" onClick={cam.stop}>Cancel</Button>
+                <Button variant="ghost" onClick={cam.stop}>
+                  Cancel
+                </Button>
               </>
             ) : (
               <Button variant="outline" onClick={() => void cam.start()} disabled={!!busy}>
@@ -570,7 +663,39 @@ function DocumentStep({
           )}
         </div>
 
-        <div className="space-y-3">
+        <div className="space-y-4">
+          <div className="space-y-2 rounded-xl border border-border/70 bg-background/30 p-4">
+            <Label htmlFor="document-type" className="text-sm font-medium">
+              What type of document are you using?
+            </Label>
+            <Select
+              value={selectedDocType}
+              onValueChange={(value) => {
+                const documentType = documentTypes.find((type) => type.value === value)?.value;
+                if (!documentType) return;
+                setSelectedDocType(documentType);
+                setFields((currentFields) => ({
+                  ...currentFields,
+                  documentType: documentType === "Auto-detect" ? "" : documentType,
+                }));
+              }}
+              disabled={!!busy}
+            >
+              <SelectTrigger id="document-type" className="bg-background/60">
+                <SelectValue placeholder="Choose a document type" />
+              </SelectTrigger>
+              <SelectContent>
+                {documentTypes.map((type) => (
+                  <SelectItem key={type.value} value={type.value}>
+                    {type.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              We’ll read the image and show fields relevant to this document.
+            </p>
+          </div>
           {ocr && (
             <div className="flex flex-wrap gap-2">
               <Badge className={good}>Text extraction: Complete</Badge>
@@ -582,29 +707,70 @@ function DocumentStep({
               </Badge>
               <Badge className={faceStatus === "found" ? good : bad}>
                 ID photo face:{" "}
-                {faceStatus === "checking" ? "Checking…" : faceStatus === "found" ? "Extracted" : "Not found"}
+                {faceStatus === "checking"
+                  ? "Checking…"
+                  : faceStatus === "found"
+                    ? "Extracted"
+                    : "Not found"}
               </Badge>
               {engine && <Badge variant="outline">{engine}</Badge>}
             </div>
           )}
 
           <div className="grid gap-3 sm:grid-cols-2">
-            {fieldLabels.map((f) => (
-              <div key={f.key} className="space-y-1.5">
-                <Label className="flex justify-between text-xs text-muted-foreground">
-                  <span>{f.label}</span>
-                  <span className="font-mono text-[10px] opacity-70">{f.side}</span>
-                </Label>
-                <Input
-                  value={fields[f.key]}
-                  placeholder={f.key.startsWith("date") || f.key === "expiryDate" ? "YYYY-MM-DD" : ""}
-                  onChange={(e) => setFields((prev) => ({ ...prev, [f.key]: e.target.value }))}
-                />
-              </div>
-            ))}
+            {fieldLabels
+              .filter((field) =>
+                (fieldsByDocumentType[selectedDocType] ?? fieldsByDocumentType.Other).includes(
+                  field.key,
+                ),
+              )
+              .map((f) => (
+                <div key={f.key} className="space-y-1.5">
+                  <Label className="flex justify-between text-xs text-muted-foreground">
+                    <span>{f.label}</span>
+                    <span className="font-mono text-[10px] opacity-70">{f.side}</span>
+                  </Label>
+                  {f.key === "gender" ? (
+                    <Select
+                      value={fields.gender || "unselected"}
+                      onValueChange={(value) =>
+                        setFields((prev) => ({
+                          ...prev,
+                          gender: value === "unselected" ? "" : value,
+                        }))
+                      }
+                    >
+                      <SelectTrigger aria-label="Gender">
+                        <SelectValue placeholder="Select gender" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="unselected">Select gender</SelectItem>
+                        <SelectItem value="Female">Female</SelectItem>
+                        <SelectItem value="Male">Male</SelectItem>
+                        <SelectItem value="Other">Other</SelectItem>
+                        <SelectItem value="Prefer not to say">Prefer not to say</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      type={
+                        f.key === "dateOfBirth" || f.key === "dateOfIssue" || f.key === "expiryDate"
+                          ? "date"
+                          : "text"
+                      }
+                      value={fields[f.key]}
+                      placeholder={
+                        f.key.startsWith("date") || f.key === "expiryDate" ? "YYYY-MM-DD" : ""
+                      }
+                      onChange={(e) => setFields((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                    />
+                  )}
+                </div>
+              ))}
           </div>
           <p className="text-xs text-muted-foreground">
-            Details fill in automatically after each scan. Check them and correct anything that is wrong.
+            Details fill in automatically after each scan. Check them and correct anything that is
+            wrong.
           </p>
 
           <div className="flex justify-between gap-3 pt-1">
@@ -619,7 +785,13 @@ function DocumentStep({
                 onNext({
                   front: images.front,
                   back: images.back,
-                  fields,
+                  fields: {
+                    ...fields,
+                    documentType:
+                      selectedDocType === "Auto-detect"
+                        ? fields.documentType || "Other"
+                        : selectedDocType,
+                  },
                   ocr: {
                     tamperingSuspected: ocr?.tamperingSuspected ?? false,
                     isIdentityDocument: ocr?.isIdentityDocument ?? true,
@@ -643,8 +815,16 @@ type Challenge = { id: ChallengeId; label: string; hint: string };
 
 const ALL_CHALLENGES: Challenge[] = [
   { id: "smile", label: "Smile at the camera", hint: "Give a clear, wide smile and hold it." },
-  { id: "left", label: "Turn your head to the left", hint: "Slowly turn your head to YOUR left and hold it." },
-  { id: "right", label: "Turn your head to the right", hint: "Slowly turn your head to YOUR right and hold it." },
+  {
+    id: "left",
+    label: "Turn your head to the left",
+    hint: "Slowly turn your head to YOUR left and hold it.",
+  },
+  {
+    id: "right",
+    label: "Turn your head to the right",
+    hint: "Slowly turn your head to YOUR right and hold it.",
+  },
   { id: "blink", label: "Blink twice", hint: "Face the camera and blink slowly, twice." },
 ];
 
@@ -661,14 +841,14 @@ function shuffleChallenges(): Challenge[] {
 }
 
 // Liveness tuning. Gestures are held for a real amount of TIME, so results don't depend on device speed.
-const HOLD_MS = 450; // a smile / head turn must be held this long
+const HOLD_MS = 180; // confirm gestures quickly while requiring consecutive frames
 const NEUTRAL_MS = 600; // neutral face before the selfie is taken
 const STEP_TIMEOUT_MS = 20000; // per attempt at a gesture
 const MAX_ATTEMPTS = 3; // attempts per gesture before the whole check fails
-const TURN_YAW = 0.24; // how far the head must turn from the neutral pose
-const TURN_RELEASE_YAW = 0.18; // tolerate small tracking jitter after a turn is detected
-const SMILE_MIN = 0.72;
-const SMILE_RELEASE_MIN = 0.58;
+const TURN_YAW = 0.17; // how far the head must turn from the neutral pose
+const TURN_RELEASE_YAW = 0.13; // tolerate small tracking jitter after a turn is detected
+const SMILE_MIN = 0.68;
+const SMILE_RELEASE_MIN = 0.55;
 const FACE_LOST_MS = 1500;
 
 function LivenessStep({
@@ -678,7 +858,9 @@ function LivenessStep({
   onBack: () => void;
   onNext: (live: Pick<Captured, "selfie" | "selfieDescriptor" | "liveness">) => void;
 }) {
-  const [phase, setPhase] = useState<"idle" | "loading" | "running" | "done" | "failed" | "nocam">("idle");
+  const [phase, setPhase] = useState<"idle" | "loading" | "running" | "done" | "failed" | "nocam">(
+    "idle",
+  );
   const [seq, setSeq] = useState<Challenge[]>(ALL_CHALLENGES);
   const [index, setIndex] = useState(-1); // -1 = capturing the neutral selfie
   const [log, setLog] = useState<ChallengeLog[]>([]);
@@ -712,6 +894,7 @@ function LivenessStep({
     let heldSince: number | null = null;
     let eyesClosed = false;
     let closedAt = 0;
+    let lastBlinkAt = 0;
     let blinkCount = 0;
     let lastSeen = stepStart;
     let lastIdCheck = 0;
@@ -728,6 +911,7 @@ function LivenessStep({
       heldSince = null;
       eyesClosed = false;
       blinkCount = 0;
+      lastBlinkAt = 0;
       armed = false;
       setBlinks(0);
     };
@@ -767,7 +951,7 @@ function LivenessStep({
       // The slow face fingerprint is only computed when needed: for the selfie, and ~1x/second to confirm it is still the same person.
       const nearFront = Math.abs(sYaw - baseYaw) < 0.2;
       const wantSelfie = step === -1 && heldSince !== null && now - heldSince >= NEUTRAL_MS;
-      const wantIdCheck = step >= 0 && ref !== null && nearFront && now - lastIdCheck > 1000;
+      const wantIdCheck = step >= 0 && ref !== null && nearFront && now - lastIdCheck > 3000;
       let f: Awaited<ReturnType<typeof analyzeVideoFrame>> = null;
       try {
         f = await analyzeVideoFrame(v, { descriptor: wantSelfie || wantIdCheck });
@@ -792,7 +976,7 @@ function LivenessStep({
         }
       }
 
-      if (f && f.score > 0.5) {
+      if (f && f.score >= 0.45) {
         lastSeen = t;
         if (first) {
           sYaw = f.yaw;
@@ -819,14 +1003,16 @@ function LivenessStep({
           if (Math.sqrt(sq) > 0.7) mismatches += 1;
           else mismatches = 0;
           if (mismatches >= 3) {
-            toast.error("A different face was detected", { description: "Please start again with the same person in view." });
+            toast.error("A different face was detected", {
+              description: "Please start again with the same person in view.",
+            });
             restartFromSelfie();
             continue;
           }
         }
 
         if (step === -1) {
-          const neutral = Math.abs(sYaw - baseYaw) < 0.12 && f.score > 0.6 && sSmile < 0.5;
+          const neutral = Math.abs(sYaw) < 0.16 && f.score > 0.6 && sSmile < 0.5;
           if (!neutral) heldSince = null;
           else if (heldSince === null) heldSince = t;
           else if (wantSelfie && f.descriptor) {
@@ -846,19 +1032,21 @@ function LivenessStep({
           }
         } else if (step >= 0 && step < sequence.length) {
           const id = sequence[step]!.id;
-          const neutral = Math.abs(rel) < 0.12 && sSmile < 0.55 && (earOpen === 0 || f.ear > earOpen * 0.85);
+          const neutral =
+            Math.abs(rel) < 0.16 && sSmile < 0.55 && (earOpen === 0 || f.ear > earOpen * 0.82);
           if (!armed) {
             if (neutral) armed = true;
           } else if (id === "blink") {
             if (Math.abs(rel) < 0.25 && earOpen > 0) {
-              if (!eyesClosed && f.ear < earOpen * 0.75) {
+              if (!eyesClosed && f.ear < earOpen * 0.82) {
                 eyesClosed = true;
                 closedAt = t;
               } else if (eyesClosed) {
                 if (f.ear > earOpen * 0.88) {
                   eyesClosed = false;
-                  if (t - closedAt < 1200) {
+                  if (t - closedAt >= 60 && t - closedAt < 1200 && t - lastBlinkAt > 180) {
                     blinkCount += 1;
+                    lastBlinkAt = t;
                     setBlinks(blinkCount);
                     if (blinkCount >= 2) pass(t);
                   }

@@ -47,7 +47,10 @@ export async function analyzeVideoFrame(
   const faceapi = await loadFaceApi();
   // Fast path (runs every frame): detector + landmarks + expressions only.
   const r = await faceapi
-    .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
+    .detectSingleFace(
+      video,
+      new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.45 }),
+    )
     .withFaceLandmarks()
     .withFaceExpressions();
   if (!r) return null;

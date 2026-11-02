@@ -61,7 +61,17 @@ const ocrSchema = {
 };
 
 export const analyzeDocument = createServerFn({ method: "POST" })
-  .inputValidator((d: unknown) => z.object({ image: dataUrl, side: z.enum(["front", "back"]).default("front") }).parse(d))
+  .inputValidator((d: unknown) =>
+    z
+      .object({
+        image: dataUrl,
+        side: z.enum(["front", "back"]).default("front"),
+        documentType: z
+          .enum(["Auto-detect", "National ID", "Passport", "Driver's License", "Other"])
+          .default("Auto-detect"),
+      })
+      .parse(d),
+  )
   .handler(async ({ data }) => {
     try {
       const { enforceRateLimit } = await import("./rate-limit.server");
@@ -73,7 +83,7 @@ export const analyzeDocument = createServerFn({ method: "POST" })
         parts: [
           {
             type: "input_text",
-            text: `This is the ${data.side} side of the document. Extract every identity field visible and assess authenticity.`,
+            text: `This is the ${data.side} side of the document. The applicant selected "${data.documentType}" as the document type. Use that selection to guide field extraction, but report the document type visible in the image. Extract every identity field visible and assess authenticity.`,
           },
           { type: "input_image", image_url: data.image },
         ],
