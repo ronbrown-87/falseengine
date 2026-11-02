@@ -5,13 +5,19 @@ import { withTimeout } from "@/lib/async";
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
   beforeLoad: async () => {
-    const { data, error } = await withTimeout(
-      supabase.auth.getUser(),
-      15_000,
-      "Authentication check",
-    );
-    if (error || !data.user) throw redirect({ to: "/auth" });
-    return { user: data.user };
+    let result: Awaited<ReturnType<typeof supabase.auth.getUser>>;
+    try {
+      result = await withTimeout(supabase.auth.getUser(), 15_000, "Authentication check");
+    } catch (error) {
+      console.error("Admin route authentication check could not complete", error);
+      throw redirect({ to: "/auth" });
+    }
+    if (result.error) {
+      console.warn("Admin route authentication check failed", result.error.message);
+      throw redirect({ to: "/auth" });
+    }
+    if (!result.data.user) throw redirect({ to: "/auth" });
+    return { user: result.data.user };
   },
   component: () => <Outlet />,
 });
