@@ -3,10 +3,21 @@ import type { OcrResult } from "./kyc.functions";
 import { withTimeout } from "./async";
 
 const OCR_TIMEOUT_MS = 30_000;
+const OCR_WORKER_STOP_TIMEOUT_MS = 5_000;
 
 const MONTHS: Record<string, string> = {
-  JAN: "01", FEB: "02", MAR: "03", APR: "04", MAY: "05", JUN: "06",
-  JUL: "07", AUG: "08", SEP: "09", OCT: "10", NOV: "11", DEC: "12",
+  JAN: "01",
+  FEB: "02",
+  MAR: "03",
+  APR: "04",
+  MAY: "05",
+  JUN: "06",
+  JUL: "07",
+  AUG: "08",
+  SEP: "09",
+  OCT: "10",
+  NOV: "11",
+  DEC: "12",
 };
 
 function normDate(s: string): string {
@@ -33,17 +44,31 @@ function mrzDate(yymmdd: string, future: boolean): string {
 export function parseIdText(raw: string, confidence: number): OcrResult {
   const text = raw.replace(/\r/g, "");
   const upper = text.toUpperCase();
-  const lines = upper.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = upper
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
   const r: OcrResult = {
-    fullName: "", documentNumber: "", dateOfBirth: "", expiryDate: "",
-    documentType: "Other", isIdentityDocument: false, tamperingSuspected: false,
-    mrzOrBarcodePresent: false, securityFeaturesVisible: false,
-    confidence: Math.round(confidence), notes: "",
-    gender: "", dateOfIssue: "", placeOfIssue: "",
+    fullName: "",
+    documentNumber: "",
+    dateOfBirth: "",
+    expiryDate: "",
+    documentType: "Other",
+    isIdentityDocument: false,
+    tamperingSuspected: false,
+    mrzOrBarcodePresent: false,
+    securityFeaturesVisible: false,
+    confidence: Math.round(confidence),
+    notes: "",
+    gender: "",
+    dateOfIssue: "",
+    placeOfIssue: "",
   };
 
   // Passport MRZ (TD3: two 44-char lines)
-  const mrz = lines.map((l) => l.replace(/\s/g, "")).filter((l) => /^[A-Z0-9<]{30,}$/.test(l) && l.includes("<"));
+  const mrz = lines
+    .map((l) => l.replace(/\s/g, ""))
+    .filter((l) => /^[A-Z0-9<]{30,}$/.test(l) && l.includes("<"));
   if (mrz.length >= 2) {
     r.mrzOrBarcodePresent = true;
     const [l1, l2] = [mrz[mrz.length - 2]!, mrz[mrz.length - 1]!];
@@ -60,7 +85,8 @@ export function parseIdText(raw: string, confidence: number): OcrResult {
   if (r.documentType === "Other") {
     if (/PASSPORT/.test(upper)) r.documentType = "Passport";
     else if (/DRIV|LICEN[CS]E/.test(upper)) r.documentType = "Driver's License";
-    else if (/NATIONAL REGISTRATION|NRC|IDENTITY|REGISTRATION CARD|\bID\b/.test(upper)) r.documentType = "National ID";
+    else if (/NATIONAL REGISTRATION|NRC|IDENTITY|REGISTRATION CARD|\bID\b/.test(upper))
+      r.documentType = "National ID";
   }
 
   // Zambian NRC: 123456/78/1
@@ -72,16 +98,25 @@ export function parseIdText(raw: string, confidence: number): OcrResult {
     }
   }
   if (!r.documentNumber) {
-    const lab = upper.match(/(?:NO|NUMBER|LICEN[CS]E NO|PASSPORT NO|ID NO)[.:\s]*([A-Z0-9][A-Z0-9\-\/]{4,14})/);
+    const lab = upper.match(
+      /(?:NO|NUMBER|LICEN[CS]E NO|PASSPORT NO|ID NO)[.:\s]*([A-Z0-9][A-Z0-9/-]{4,14})/,
+    );
     const generic = upper.match(/\b([A-Z]{1,2}\d{6,9}|\d{8,12})\b/);
     r.documentNumber = (lab?.[1] ?? generic?.[1] ?? "").trim();
   }
 
   // Dates
-  const dateRe = /(\d{1,2}[\/.\-\s](?:\d{1,2}|[A-Z]{3})[\/.\-\s]\d{2,4}|\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2})/g;
+  const dateRe =
+    /(\d{1,2}[./\s-](?:\d{1,2}|[A-Z]{3})[./\s-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})/g;
   const noNrc = (l: string) => l.replace(/\d{6}\s*\/\s*\d{2}\s*\/\s*\d/g, " ");
   const labelled = (re: RegExp) => {
-    for (const raw of lines) { const l = noNrc(raw); if (re.test(l)) { const d = l.match(dateRe); if (d) return normDate(d[0]); } }
+    for (const raw of lines) {
+      const l = noNrc(raw);
+      if (re.test(l)) {
+        const d = l.match(dateRe);
+        if (d) return normDate(d[0]);
+      }
+    }
     return "";
   };
   r.dateOfBirth ||= labelled(/BIRTH|D\.?O\.?B|BORN/);
@@ -101,9 +136,13 @@ export function parseIdText(raw: string, confidence: number): OcrResult {
         if (v) parts.push(v);
       }
     }
-    if (parts.length) r.fullName = parts.length > 1 ? `${parts.slice(1).join(" ")} ${parts[0]}` : parts[0]!;
+    if (parts.length)
+      r.fullName = parts.length > 1 ? `${parts.slice(1).join(" ")} ${parts[0]}` : parts[0]!;
   }
-  r.fullName = r.fullName.replace(/\s+/g, " ").trim().replace(/\b\w+/g, (w) => w[0] + w.slice(1).toLowerCase());
+  r.fullName = r.fullName
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w+/g, (w) => w[0] + w.slice(1).toLowerCase());
 
   Object.assign(r, parseBackFields(upper, lines));
 
@@ -121,9 +160,10 @@ export function parseIdText(raw: string, confidence: number): OcrResult {
 // Fields usually printed on the back of an NRC / licence (also checked on the front).
 export function parseBackFields(upper: string, lines: string[]) {
   const out = { gender: "", dateOfIssue: "", placeOfIssue: "" };
-  const g = upper.match(/\b(?:SEX|GENDER)[:\s]*(M|F|MALE|FEMALE)\b/) ?? upper.match(/\b(MALE|FEMALE)\b/);
+  const g =
+    upper.match(/\b(?:SEX|GENDER)[:\s]*(M|F|MALE|FEMALE)\b/) ?? upper.match(/\b(MALE|FEMALE)\b/);
   if (g) out.gender = g[1]!.startsWith("F") ? "Female" : "Male";
-  const dateRe = /(\d{1,2}[\/.\-\s](?:\d{1,2}|[A-Z]{3})[\/.\-\s]\d{2,4}|\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2})/;
+  const dateRe = /(\d{1,2}[./\s-](?:\d{1,2}|[A-Z]{3})[./\s-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})/;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!;
     if (!out.dateOfIssue && /ISSUE/.test(l) && !/PLACE/.test(l)) {
@@ -132,7 +172,8 @@ export function parseBackFields(upper: string, lines: string[]) {
     }
     if (!out.placeOfIssue) {
       const m = l.match(/(?:PLACE OF ISSUE|ISSUED AT|DISTRICT|PLACE)[:\s]*([A-Z][A-Z\s'-]{2,30})/);
-      if (m) out.placeOfIssue = m[1]!.trim().replace(/\b\w+/g, (w) => w[0] + w.slice(1).toLowerCase());
+      if (m)
+        out.placeOfIssue = m[1]!.trim().replace(/\b\w+/g, (w) => w[0] + w.slice(1).toLowerCase());
     }
   }
   return out;
@@ -140,7 +181,11 @@ export function parseBackFields(upper: string, lines: string[]) {
 
 async function recognize(image: string) {
   // Language data downloads on first use; if that stalls we must give up instead of spinning forever.
-  const { createWorker } = await import("tesseract.js");
+  const { createWorker } = await withTimeout(
+    import("tesseract.js"),
+    OCR_TIMEOUT_MS,
+    "Loading the text reader",
+  );
   let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
   try {
     const creating = createWorker("eng");
@@ -148,13 +193,25 @@ async function recognize(image: string) {
       worker = await withTimeout(creating, OCR_TIMEOUT_MS, "Loading the text reader");
     } catch (e) {
       // Don't leak a half-started worker if loading stalled.
-      void creating.then((w) => w.terminate()).catch(() => {});
+      void creating
+        .then((w) => stopWorker(w))
+        .catch((stopError) => console.warn("On-device reader initialization failed", stopError));
       throw e;
     }
     const { data } = await withTimeout(worker.recognize(image), OCR_TIMEOUT_MS, "Reading the card");
     return { text: data.text ?? "", confidence: data.confidence ?? 0 };
   } finally {
-    await worker?.terminate().catch(() => {});
+    if (worker) await stopWorker(worker);
+  }
+}
+
+async function stopWorker(
+  worker: Awaited<ReturnType<(typeof import("tesseract.js"))["createWorker"]>>,
+) {
+  try {
+    await withTimeout(worker.terminate(), OCR_WORKER_STOP_TIMEOUT_MS, "Stopping the text reader");
+  } catch (error) {
+    console.warn("Could not stop the on-device reader cleanly", error);
   }
 }
 
